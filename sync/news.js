@@ -5,16 +5,25 @@
 const crypto = require("crypto");
 const Parser = require("rss-parser");
 const { getFirestore, Timestamp } = require("firebase-admin/firestore");
-const { logger } = require("firebase-functions");
 const { NEWS_FEEDS } = require("./config");
 
 const parser = new Parser({
-  timeout: 10000,
+  timeout: 15000,
+  headers: { "User-Agent": "Mozilla/5.0 (KooraLive news reader)" },
   customFields: { item: [["media:thumbnail", "thumbnail"], ["media:content", "mediaContent"]] },
 });
 
+// First <img src="..."> in the article HTML (WordPress feeds like Hespress).
+const imgInHtml = (html = "") => {
+  const m = /<img[^>]+src=["']([^"']+)["']/i.exec(html);
+  return m ? m[1] : "";
+};
+
 const imageOf = (item) =>
-  item.enclosure?.url || item.thumbnail?.$?.url || item.mediaContent?.$?.url || "";
+  item.enclosure?.url ||
+  item.thumbnail?.$?.url ||
+  item.mediaContent?.$?.url ||
+  imgInHtml(item["content:encoded"] || item.content || "");
 
 const clean = (s = "") => s.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
 
@@ -24,6 +33,7 @@ async function syncNews(perFeed = 15) {
   let count = 0;
 
   for (const feed of NEWS_FEEDS) {
+    let n = 0;
     try {
       const f = await parser.parseURL(feed.url);
       for (const item of (f.items || []).slice(0, perFeed)) {
@@ -37,14 +47,17 @@ async function syncNews(perFeed = 15) {
           imageUrl: imageOf(item),
           leagueName: feed.leagueName || "",
           source: feed.source,
+          lang: feed.lang || "en",
           url: item.link,
           publishedAt: Timestamp.fromDate(item.isoDate ? new Date(item.isoDate) : new Date()),
         }, { merge: true });
-        count++;
+        n++;
       }
+      console.log(`  news ${feed.source} (${feed.lang}): ${n}`);
     } catch (e) {
-      logger.warn(`News feed failed (${feed.url}): ${e.message}`);
+      console.warn(`  news feed failed (${feed.source} ${feed.url}): ${e.message}`);
     }
+    count += n;
   }
 
   await writer.close();

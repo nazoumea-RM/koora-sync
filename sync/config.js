@@ -51,11 +51,17 @@ exports.CHANNELS = {
 /**
  * RSS feeds for the news tab. The app stores only the headline, a short
  * summary, the image and a link — the full article opens on the publisher's
- * site. Check each publisher's terms before going to production.
+ * site. `lang` must match the app language filter: "ar", "fr" or "en".
+ * Check each publisher's terms before going to production.
  */
 exports.NEWS_FEEDS = [
-  { url: "https://feeds.bbci.co.uk/sport/football/rss.xml", source: "BBC Sport", leagueName: "" },
-  { url: "https://www.theguardian.com/football/rss", source: "The Guardian", leagueName: "" },
+  // Arabic
+  { url: "https://www.hespress.com/sport/feed", source: "Hespress", lang: "ar", leagueName: "" },
+  // French
+  { url: "https://rss.maxifoot.com/football-general.xml", source: "Maxifoot", lang: "fr", leagueName: "" },
+  // English
+  { url: "https://feeds.bbci.co.uk/sport/football/rss.xml", source: "BBC Sport", lang: "en", leagueName: "" },
+  { url: "https://www.theguardian.com/football/rss", source: "The Guardian", lang: "en", leagueName: "" },
 ];
 
 /** Small shared helpers. */
