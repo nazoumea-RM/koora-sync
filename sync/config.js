@@ -58,7 +58,7 @@ exports.NEWS_FEEDS = [
   // Arabic
   { url: "https://www.hespress.com/sport/feed", source: "Hespress", lang: "ar", leagueName: "" },
   // French
-  { url: "https://rss.maxifoot.com/football-general.xml", source: "Maxifoot", lang: "fr", leagueName: "" },
+  { url: "https://www.footmercato.net/flux-rss", source: "Foot Mercato", lang: "fr", leagueName: "" },
   // English
   { url: "https://feeds.bbci.co.uk/sport/football/rss.xml", source: "BBC Sport", lang: "en", leagueName: "" },
   { url: "https://www.theguardian.com/football/rss", source: "The Guardian", lang: "en", leagueName: "" },
