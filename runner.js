@@ -355,6 +355,25 @@ function mapStats(rows) {
   return out.sort((a, b) => rank(a.label) - rank(b.label));
 }
 
+// lineups: { home: { formation, starting: [{ name, number, position }], subs: [...] }, away: {...} }
+function mapLineup(rows) {
+  const side = () => ({ formation: "", starting: [], subs: [] });
+  const out = { home: side(), away: side() };
+  for (const r of rows || []) {
+    if (!r.strPlayer) continue;
+    const s = String(r.strHome || "").toLowerCase() === "yes" ? out.home : out.away;
+    const p = {
+      name: r.strPlayer,
+      number: parseInt(r.intSquadNumber, 10) || 0,
+      position: r.strPosition || "",
+    };
+    if (String(r.strSubstitute || "").toLowerCase() === "yes") s.subs.push(p);
+    else s.starting.push(p);
+    if (r.strFormation && !s.formation) s.formation = r.strFormation;
+  }
+  return out;
+}
+
 async function syncEvents() {
   if (!TSDB_KEY) return;
   const now = Date.now();
@@ -379,17 +398,26 @@ async function syncEvents() {
       } catch (e) {
         console.error(`  stats ${id}:`, e.message);
       }
-      const sig = `${events.length}|${stats.length}|${stats.map((x) => x.home + ":" + x.away).join(",")}`;
-      if ((events.length || stats.length) && sig !== eventsCount.get(id)) {
+      let lineups = null;
+      try {
+        const l = await tsdbV1(`lookuplineup.php?id=${tsdbId}`);
+        lineups = mapLineup(l.lineup);
+      } catch (e) {
+        console.error(`  lineup ${id}:`, e.message);
+      }
+      const nLine = lineups ? lineups.home.starting.length + lineups.away.starting.length : 0;
+      const sig = `${events.length}|${stats.length}|${nLine}|${stats.map((x) => x.home + ":" + x.away).join(",")}`;
+      if ((events.length || stats.length || nLine) && sig !== eventsCount.get(id)) {
         const upd = { tsdbEventId: tsdbId };
         if (events.length) upd.events = events;
         if (stats.length) upd.stats = stats;
+        if (nLine) upd.lineups = lineups;
         await db.collection("matches").doc(id).set(upd, { merge: true });
         eventsCount.set(id, sig);
         written++;
-        console.log(`  events ${id}: ${events.length} events, ${stats.length} stats`);
+        console.log(`  events ${id}: ${events.length} events, ${stats.length} stats, ${nLine} lineup players`);
       }
-      if (st.status === "finished" && events.length && stats.length) eventsDone.add(id);
+      if (st.status === "finished" && events.length && stats.length && nLine) eventsDone.add(id);
     } catch (e) {
       console.error(`  events ${id}:`, e.message);
     }
