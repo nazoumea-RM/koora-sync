@@ -266,7 +266,104 @@ async function syncMatches() {
     if (c.prev) await notify(c.id, c.prev, c.doc).catch((e) => console.error("notify:", e.message));
   }
 
+  lastMatches = data.matches || [];
   console.log(`${new Date().toISOString()} matches: ${(data.matches || []).length} fetched, ${changed.length} written`);
+}
+
+// ── Match events (goals, cards, substitutions) from TheSportsDB ──────────
+// Same shape the app already reads:
+//   events: [{ type, minute, player, team: "home"|"away", detail }]
+//   type: goal | penalty | ownGoal | yellowCard | redCard | substitution
+//   substitution: player = in, detail = out
+
+let lastMatches = [];
+const eventsDone = new Set();   // fd ids whose final events are written
+const eventsCount = new Map();  // fd id -> number of events last written
+const dayIndex = new Map();     // "YYYY-MM-DD|leagueId" -> [tsdb events]
+
+async function tsdbV1(path) {
+  const res = await fetch(`https://www.thesportsdb.com/api/v1/json/${TSDB_KEY}/${path}`);
+  if (!res.ok) throw new Error(`TheSportsDB ${res.status} ${path}`);
+  return res.json();
+}
+
+async function tsdbDay(day, tsdbLeague) {
+  const key = `${day}|${tsdbLeague}`;
+  if (!dayIndex.has(key)) {
+    const d = await tsdbV1(`eventsday.php?d=${day}&l=${tsdbLeague}`);
+    dayIndex.set(key, d.events || []);
+  }
+  return dayIndex.get(key);
+}
+
+async function findTsdbEventId(m) {
+  const leagueId = FOOTBALL_DATA_COMPETITIONS[m.competition && m.competition.code];
+  const tsdbLeague = Object.keys(TSDB_LEAGUES).find((k) => TSDB_LEAGUES[k] === leagueId);
+  if (!tsdbLeague) return null;
+  const h = m.homeTeam || {};
+  const a = m.awayTeam || {};
+  for (const day of new Set([m.utcDate.slice(0, 10), new Date(new Date(m.utcDate).getTime() - 86400000).toISOString().slice(0, 10)])) {
+    for (const ev of await tsdbDay(day, tsdbLeague)) {
+      const hOk = overlap(ev.strHomeTeam, h.shortName) || overlap(ev.strHomeTeam, h.name);
+      const aOk = overlap(ev.strAwayTeam, a.shortName) || overlap(ev.strAwayTeam, a.name);
+      if (hOk && aOk) return String(ev.idEvent);
+    }
+  }
+  return null;
+}
+
+function mapTimeline(rows) {
+  const out = [];
+  for (const r of rows || []) {
+    const kind = String(r.strTimeline || "").toLowerCase();
+    const det = String(r.strTimelineDetail || "").toLowerCase();
+    let type = null;
+    if (kind.includes("goal")) type = det.includes("pen") ? "penalty" : det.includes("own") ? "ownGoal" : "goal";
+    else if (kind.includes("card")) type = det.includes("red") ? "redCard" : "yellowCard";
+    else if (kind.includes("subst")) type = "substitution";
+    if (!type) continue;
+    const assist = (r.strAssist || "").trim();
+    out.push({
+      type,
+      minute: parseInt(r.intTime, 10) || 0,
+      player: r.strPlayer || "",
+      team: String(r.strHome || "").toLowerCase() === "yes" ? "home" : "away",
+      detail: type === "substitution" ? assist : (type === "goal" && assist ? `Assist: ${assist}` : ""),
+    });
+  }
+  return out.sort((x, y) => x.minute - y.minute);
+}
+
+async function syncEvents() {
+  if (!TSDB_KEY) return;
+  const now = Date.now();
+  let written = 0;
+
+  for (const m of lastMatches) {
+    const id = `fd_${m.id}`;
+    if (eventsDone.has(id)) continue;
+    const st = cache.get(id);
+    if (!st || !PLAYED.has(st.status)) continue;
+    if (now - new Date(m.utcDate).getTime() > 3 * 86400000) continue;
+
+    try {
+      const tsdbId = (await findTsdbEventId(m));
+      if (!tsdbId) continue;
+      const tl = await tsdbV1(`lookuptimeline.php?id=${tsdbId}`);
+      const events = mapTimeline(tl.timeline);
+      if (events.length && events.length !== eventsCount.get(id)) {
+        await db.collection("matches").doc(id).set({ events, tsdbEventId: tsdbId }, { merge: true });
+        eventsCount.set(id, events.length);
+        written++;
+        console.log(`  events ${id}: ${events.length}`);
+      }
+      if (st.status === "finished" && events.length) eventsDone.add(id);
+    } catch (e) {
+      console.error(`  events ${id}:`, e.message);
+    }
+  }
+  dayIndex.clear(); // refresh day listings next time
+  console.log(`events: ${written} matches updated`);
 }
 
 // Same rules as notifyMatchUpdates in functions/index.js
@@ -329,11 +426,18 @@ async function safe(name, fn) {
 
   let lastNews = 0;
   let lastBotola = 0;
+  let lastEvents = 0;
+  const EVENTS_EVERY = 6 * 60 * 1000; // goals/cards/subs every 6 minutes
 
   while (Date.now() < end) {
     const t0 = Date.now();
 
     await safe("matches", syncMatches);
+
+    if (t0 - lastEvents >= EVENTS_EVERY) {
+      lastEvents = t0;
+      await safe("events", syncEvents);
+    }
 
     if (t0 - lastNews >= NEWS_EVERY) {
       lastNews = t0;
