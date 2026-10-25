@@ -57,6 +57,7 @@ exports.CHANNELS = {
 exports.NEWS_FEEDS = [
   // Arabic
   { url: "https://www.hespress.com/sport/feed", source: "Hespress", lang: "ar", leagueName: "" },
+  { url: "https://feeds.footballco.com/kooora/feed/6p5bsxot7te8yick", source: "Kooora", lang: "ar", leagueName: "" },
   // French
   { url: "https://www.footmercato.net/flux-rss", source: "Foot Mercato", lang: "fr", leagueName: "" },
   // English
