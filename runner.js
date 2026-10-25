@@ -453,6 +453,7 @@ const EXTRA_TSDB = [
 ];
 const espnDocs = [];           // old ESPN docs of those leagues (to remove once duplicated)
 const espnDeleted = new Set();
+const channelsFixed = new Set();
 
 const TSDB_FULL = {
   NS: "scheduled", TBD: "scheduled", "NOT STARTED": "scheduled",
@@ -610,11 +611,14 @@ async function syncTsdbLeagues() {
           cache.set(id, snap.exists ? stateOf(snap.data()) : null);
         }
         const prev = cache.get(id);
-        if (same(prev, next)) continue;
+        // Give old docs the league's TV channels once (CAF docs lost them when moved from ESPN).
+        const needChannels = !isNew && league.channels.length && !channelsFixed.has(id);
+        if (same(prev, next) && !needChannels) continue;
         // never go back from played to "not started" because a poll lost the score
         if (prev && PLAYED.has(prev.status) && !PLAYED.has(doc.status) && doc.status !== "postponed") continue;
 
-        if (isNew) doc.channels = league.channels;
+        if (isNew || needChannels) doc.channels = league.channels;
+        channelsFixed.add(id);
         batch.set(ref, doc, { merge: true });
         cache.set(id, next);
         changed.push({ id, prev, doc });
