@@ -379,15 +379,27 @@ async function syncEvents() {
   const now = Date.now();
   let written = 0;
 
+  const todo = [];
   for (const m of lastMatches) {
     const id = `fd_${m.id}`;
     if (eventsDone.has(id)) continue;
     const st = cache.get(id);
     if (!st || !PLAYED.has(st.status)) continue;
     if (now - new Date(m.utcDate).getTime() > 3 * 86400000) continue;
+    todo.push({ id, st, find: () => findTsdbEventId(m) });
+  }
+  // Matches that come straight from TheSportsDB (Botola, CAF, ...): id is known.
+  for (const [id, info] of tsdbMatches) {
+    if (eventsDone.has(id)) continue;
+    const st = cache.get(id);
+    if (!st || !PLAYED.has(st.status)) continue;
+    if (now - info.kickoff > 3 * 86400000) continue;
+    todo.push({ id, st, find: async () => info.tsdbId });
+  }
 
+  for (const { id, st, find } of todo) {
     try {
-      const tsdbId = (await findTsdbEventId(m));
+      const tsdbId = await find();
       if (!tsdbId) continue;
       const tl = await tsdbV1(`lookuptimeline.php?id=${tsdbId}`);
       const events = mapTimeline(tl.timeline);
@@ -424,6 +436,132 @@ async function syncEvents() {
   }
   dayIndex.clear(); // refresh day listings next time
   console.log(`events: ${written} matches updated`);
+}
+
+// ── Leagues that come straight from TheSportsDB (Botola, CAF, Conference...) ──
+// The app already has docs "tsdb_<idEvent>" for them (provider "thesportsdb").
+// Once per run we find which TheSportsDB leagues they belong to, then every
+// cycle we refresh yesterday / today / tomorrow + the live feed for those leagues.
+
+const tsdbLeagues = new Map(); // TheSportsDB idLeague -> { leagueId, leagueName, channels }
+const tsdbMatches = new Map(); // "tsdb_<id>" -> { tsdbId, kickoff }
+
+const TSDB_FULL = {
+  NS: "scheduled", TBD: "scheduled", "NOT STARTED": "scheduled",
+  "1H": "live", "2H": "live", ET: "live", BT: "live", P: "live", LIVE: "live", INT: "live",
+  HT: "halftime",
+  FT: "finished", AET: "finished", PEN: "finished", AP: "finished", AW: "finished", "MATCH FINISHED": "finished",
+  PST: "postponed", CANC: "postponed", ABD: "postponed", SUSP: "postponed", POSTPONED: "postponed",
+};
+
+async function discoverTsdbLeagues() {
+  if (!TSDB_KEY) return;
+  const from = Timestamp.fromMillis(Date.now() - 4 * 86400000);
+  const to = Timestamp.fromMillis(Date.now() + 10 * 86400000);
+  const snap = await db.collection("matches").where("kickoff", ">=", from).where("kickoff", "<=", to).get();
+
+  const sample = new Map(); // app leagueId -> one doc
+  for (const d of snap.docs) {
+    const x = d.data();
+    if (x.provider !== "thesportsdb" || !x.tsdbEventId || !x.leagueId) continue;
+    if (!sample.has(x.leagueId)) sample.set(x.leagueId, x);
+  }
+  for (const [leagueId, x] of sample) {
+    if ([...tsdbLeagues.values()].some((l) => l.leagueId === leagueId)) continue;
+    try {
+      const e = await tsdbV1(`lookupevent.php?id=${x.tsdbEventId}`);
+      const ev = (e.events || [])[0];
+      if (!ev || !ev.idLeague) continue;
+      tsdbLeagues.set(String(ev.idLeague), {
+        leagueId,
+        leagueName: x.leagueName || ev.strLeague || "",
+        channels: x.channels || [],
+      });
+    } catch (err) {
+      console.error(`  tsdb league ${leagueId}:`, err.message);
+    }
+  }
+  console.log(`tsdb leagues: ${[...tsdbLeagues.values()].map((l) => l.leagueId).join(", ") || "none"}`);
+}
+
+function tsdbDoc(ev, league) {
+  const ts = ev.strTimestamp
+    ? new Date(ev.strTimestamp.endsWith("Z") ? ev.strTimestamp : ev.strTimestamp + "Z")
+    : new Date(`${ev.dateEvent}T${ev.strTime || "00:00:00"}Z`);
+  const hasScore = ev.intHomeScore != null && ev.intHomeScore !== "";
+  let status = TSDB_FULL[String(ev.strStatus || "").toUpperCase()] || "scheduled";
+  if (status === "scheduled" && hasScore && ts.getTime() < Date.now() - 2.5 * 3600000) status = "finished";
+  return {
+    leagueId: league.leagueId,
+    leagueName: league.leagueName,
+    homeTeam: { id: `tsdb_${ev.idHomeTeam}`, name: ev.strHomeTeam || "TBD", logoUrl: ev.strHomeTeamBadge || "" },
+    awayTeam: { id: `tsdb_${ev.idAwayTeam}`, name: ev.strAwayTeam || "TBD", logoUrl: ev.strAwayTeamBadge || "" },
+    homeScore: Number(ev.intHomeScore) || 0,
+    awayScore: Number(ev.intAwayScore) || 0,
+    status,
+    minute: parseInt(ev.strProgress, 10) || 0,
+    kickoff: Timestamp.fromDate(ts),
+    venue: ev.strVenue || "",
+    provider: "thesportsdb",
+    tsdbEventId: String(ev.idEvent),
+    updatedAt: Timestamp.now(),
+  };
+}
+
+async function syncTsdbLeagues() {
+  if (!TSDB_KEY || tsdbLeagues.size === 0) return;
+  const days = [isoDay(-1), isoDay(0), isoDay(1)];
+  const live = new Map();
+  try {
+    for (const ev of await fetchLiveScores()) live.set(String(ev.idEvent), ev);
+  } catch (e) {
+    console.error("livescore:", e.message);
+  }
+
+  const batch = db.batch();
+  const changed = [];
+  for (const [idLeague, league] of tsdbLeagues) {
+    for (const day of days) {
+      let events = [];
+      try {
+        events = (await tsdbV1(`eventsday.php?d=${day}&l=${idLeague}`)).events || [];
+      } catch (e) {
+        console.error(`  tsdb ${league.leagueId} ${day}:`, e.message);
+        continue;
+      }
+      for (let ev of events) {
+        const lv = live.get(String(ev.idEvent));
+        if (lv) ev = { ...ev, intHomeScore: lv.intHomeScore, intAwayScore: lv.intAwayScore, strStatus: lv.strStatus, strProgress: lv.strProgress };
+        const id = `tsdb_${ev.idEvent}`;
+        const ref = db.collection("matches").doc(id);
+        const doc = tsdbDoc(ev, league);
+        tsdbMatches.set(id, { tsdbId: String(ev.idEvent), kickoff: doc.kickoff.toMillis() });
+        const next = stateOf(doc);
+
+        let isNew = false;
+        if (!cache.has(id)) {
+          const snap = await ref.get();
+          isNew = !snap.exists;
+          cache.set(id, snap.exists ? stateOf(snap.data()) : null);
+        }
+        const prev = cache.get(id);
+        if (same(prev, next)) continue;
+        // never go back from played to "not started" because a poll lost the score
+        if (prev && PLAYED.has(prev.status) && !PLAYED.has(doc.status) && doc.status !== "postponed") continue;
+
+        if (isNew) doc.channels = league.channels;
+        batch.set(ref, doc, { merge: true });
+        cache.set(id, next);
+        changed.push({ id, prev, doc });
+        console.log(`  write ${id}: ${doc.homeTeam.name} ${doc.homeScore}-${doc.awayScore} ${doc.awayTeam.name} [${prev ? prev.status : "new"} -> ${doc.status}]`);
+      }
+    }
+  }
+  if (changed.length) await batch.commit();
+  for (const c of changed) {
+    if (c.prev) await notify(c.id, c.prev, c.doc).catch((e) => console.error("notify:", e.message));
+  }
+  console.log(`tsdb matches: ${changed.length} written`);
 }
 
 // Same rules as notifyMatchUpdates in functions/index.js
@@ -484,6 +622,8 @@ async function safe(name, fn) {
     });
   }
 
+  await safe("tsdb leagues", discoverTsdbLeagues);
+
   let lastNews = 0;
   let lastBotola = 0;
   let lastEvents = 0;
@@ -493,6 +633,7 @@ async function safe(name, fn) {
     const t0 = Date.now();
 
     await safe("matches", syncMatches);
+    await safe("tsdb matches", syncTsdbLeagues);
 
     if (t0 - lastEvents >= EVENTS_EVERY) {
       lastEvents = t0;
