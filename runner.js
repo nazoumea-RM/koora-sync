@@ -103,6 +103,7 @@ const overlap = (a, b) => {
 
 async function fetchLiveScores() {
   if (!TSDB_KEY) return [];
+  await tsdbThrottle();
   const res = await fetch("https://www.thesportsdb.com/api/v2/json/livescore/soccer", {
     headers: { "X-API-KEY": TSDB_KEY },
   });
@@ -278,13 +279,32 @@ async function syncMatches() {
 
 let lastMatches = [];
 const eventsDone = new Set();   // fd ids whose final events are written
-const eventsCount = new Map();  // fd id -> number of events last written
+const eventsCount = new Map();
+const eventsTried = new Map();  // id -> last attempt time
+const eventsMisses = new Map(); // id -> attempts after full time  // fd id -> number of events last written
 const dayIndex = new Map();     // "YYYY-MM-DD|leagueId" -> [tsdb events]
 
+// TheSportsDB Premium allows ~100 requests/minute: keep at most one every 0.8 s,
+// and wait + retry when it still answers 429 (too many requests).
+let tsdbLast = 0;
+async function tsdbThrottle() {
+  const wait = tsdbLast + 800 - Date.now();
+  if (wait > 0) await sleep(wait);
+  tsdbLast = Date.now();
+}
+
 async function tsdbV1(path) {
-  const res = await fetch(`https://www.thesportsdb.com/api/v1/json/${TSDB_KEY}/${path}`);
-  if (!res.ok) throw new Error(`TheSportsDB ${res.status} ${path}`);
-  return res.json();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await tsdbThrottle();
+    const res = await fetch(`https://www.thesportsdb.com/api/v1/json/${TSDB_KEY}/${path}`);
+    if (res.status === 429) {
+      await sleep(20000 * (attempt + 1));
+      continue;
+    }
+    if (!res.ok) throw new Error(`TheSportsDB ${res.status} ${path}`);
+    return res.json();
+  }
+  throw new Error(`TheSportsDB 429 ${path}`);
 }
 
 async function tsdbDay(day, tsdbLeague) {
@@ -397,7 +417,12 @@ async function syncEvents() {
     todo.push({ id, st, find: async () => info.tsdbId });
   }
 
-  for (const { id, st, find } of todo) {
+  // Live matches first, then the ones tried least recently; at most 12 per cycle
+  // (3 TheSportsDB calls each) to stay under the rate limit.
+  todo.sort((a, b) => (PLAYED.has(b.st.status) && b.st.status !== "finished") - (PLAYED.has(a.st.status) && a.st.status !== "finished")
+    || (eventsTried.get(a.id) || 0) - (eventsTried.get(b.id) || 0));
+  for (const { id, st, find } of todo.slice(0, 12)) {
+    eventsTried.set(id, Date.now());
     try {
       const tsdbId = await find();
       if (!tsdbId) continue;
@@ -429,7 +454,12 @@ async function syncEvents() {
         written++;
         console.log(`  events ${id}: ${events.length} events, ${stats.length} stats, ${nLine} lineup players`);
       }
-      if (st.status === "finished" && events.length && stats.length && nLine) eventsDone.add(id);
+      if (st.status === "finished") {
+        const n = (eventsMisses.get(id) || 0) + 1;
+        eventsMisses.set(id, n);
+        // all data in, or TheSportsDB still has nothing after 4 tries: stop asking
+        if ((events.length && stats.length && nLine) || n >= 4) eventsDone.add(id);
+      }
     } catch (e) {
       console.error(`  events ${id}:`, e.message);
     }
