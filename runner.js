@@ -243,14 +243,11 @@ async function syncMatches() {
     const prev = cache.get(id);
     if (same(prev, next)) continue; // nothing changed → no write
 
-    // Never step back: once a match is live/finished in Firestore, a stale
-    // "scheduled" from football-data (live feed dropped it) must not undo it.
-    // Only protects states that came from real data (TheSportsDB live feed);
-    // a fake "live 0-0" written earlier from football-data alone is corrected.
-    if (
-      prev && PLAYED.has(prev.status) && !PLAYED.has(doc.status) && doc.status !== "postponed" &&
-      prev.src.includes("thesportsdb")
-    ) continue;
+    // Never step back: football-data's free tier alternates between returning
+    // the score and returning null for the same match. When this poll has no
+    // real score (and no live feed), keep whatever played state Firestore has.
+    const hasRealScore = ft.home != null || !!lv;
+    if (prev && PLAYED.has(prev.status) && !hasRealScore && doc.status !== "postponed") continue;
 
     batch.set(ref, doc, { merge: true });
     if (isNew) {
