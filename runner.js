@@ -446,6 +446,14 @@ async function syncEvents() {
 const tsdbLeagues = new Map(); // TheSportsDB idLeague -> { leagueId, leagueName, channels }
 const tsdbMatches = new Map(); // "tsdb_<id>" -> { tsdbId, kickoff }
 
+// CAF cups were imported from ESPN; we now take them from TheSportsDB.
+const EXTRA_TSDB = [
+  { leagueId: "cafcl", name: "CAF Champions League", match: /caf champions league/i },
+  { leagueId: "cafcc", name: "CAF Confederation Cup", match: /caf confederation cup/i },
+];
+const espnDocs = [];           // old ESPN docs of those leagues (to remove once duplicated)
+const espnDeleted = new Set();
+
 const TSDB_FULL = {
   NS: "scheduled", TBD: "scheduled", "NOT STARTED": "scheduled",
   "1H": "live", "2H": "live", ET: "live", BT: "live", P: "live", LIVE: "live", INT: "live",
@@ -466,6 +474,49 @@ async function discoverTsdbLeagues() {
     if (x.provider !== "thesportsdb" || !x.tsdbEventId || !x.leagueId) continue;
     if (!sample.has(x.leagueId)) sample.set(x.leagueId, x);
   }
+  // ESPN-sourced leagues we move to TheSportsDB (CAF cups). Keep their name/channels.
+  espnDocs.length = 0;
+  const espnSample = new Map();
+  for (const d of snap.docs) {
+    const x = d.data();
+    if (x.provider !== "espn" || !EXTRA_TSDB.some((e) => e.leagueId === x.leagueId)) continue;
+    if (!espnSample.has(x.leagueId)) espnSample.set(x.leagueId, x);
+    espnDocs.push({
+      id: d.id,
+      leagueId: x.leagueId,
+      kickoff: x.kickoff && x.kickoff.toMillis ? x.kickoff.toMillis() : 0,
+      home: (x.homeTeam || {}).name || "",
+      away: (x.awayTeam || {}).name || "",
+    });
+  }
+  const missing = EXTRA_TSDB.filter((e) => ![...tsdbLeagues.values()].some((l) => l.leagueId === e.leagueId));
+  if (missing.length) {
+    let all = [];
+    for (const path of ["all_leagues.php", "search_all_leagues.php?s=Soccer"]) {
+      try {
+        const r = await tsdbV1(path);
+        all = all.concat(r.leagues || r.countries || r.countrys || []);
+      } catch (err) {
+        console.error(`  tsdb ${path}:`, err.message);
+      }
+    }
+    for (const e of missing) {
+      const lg = all.find((l) => e.match.test(l.strLeague || "") && (!l.strSport || l.strSport === "Soccer"));
+      if (!lg) {
+        console.log(`  tsdb league not found for ${e.leagueId}`);
+        continue;
+      }
+      const s = espnSample.get(e.leagueId) || {};
+      tsdbLeagues.set(String(lg.idLeague), {
+        leagueId: e.leagueId,
+        leagueName: s.leagueName || e.name,
+        channels: s.channels || [],
+        replacesEspn: true,
+      });
+      console.log(`  ${e.leagueId} -> TheSportsDB league ${lg.idLeague} (${lg.strLeague})`);
+    }
+  }
+
   for (const [leagueId, x] of sample) {
     if ([...tsdbLeagues.values()].some((l) => l.leagueId === leagueId)) continue;
     try {
@@ -520,6 +571,7 @@ async function syncTsdbLeagues() {
 
   const batch = db.batch();
   const changed = [];
+  let dels = 0;
   for (const [idLeague, league] of tsdbLeagues) {
     for (const day of days) {
       let events = [];
@@ -536,6 +588,19 @@ async function syncTsdbLeagues() {
         const ref = db.collection("matches").doc(id);
         const doc = tsdbDoc(ev, league);
         tsdbMatches.set(id, { tsdbId: String(ev.idEvent), kickoff: doc.kickoff.toMillis() });
+        // Same match already present from ESPN? Remove the old copy so it isn't shown twice.
+        if (league.replacesEspn) {
+          for (const e of espnDocs) {
+            if (espnDeleted.has(e.id) || e.leagueId !== league.leagueId) continue;
+            if (Math.abs(e.kickoff - doc.kickoff.toMillis()) > 36 * 3600000) continue;
+            if (!overlap(e.home, doc.homeTeam.name) || !overlap(e.away, doc.awayTeam.name)) continue;
+            batch.delete(db.collection("matches").doc(e.id));
+            espnDeleted.add(e.id);
+            dels++;
+            console.log(`  replace ${e.id} (${e.home} - ${e.away}) by ${id}`);
+          }
+        }
+
         const next = stateOf(doc);
 
         let isNew = false;
@@ -557,7 +622,7 @@ async function syncTsdbLeagues() {
       }
     }
   }
-  if (changed.length) await batch.commit();
+  if (changed.length || dels) await batch.commit();
   for (const c of changed) {
     if (c.prev) await notify(c.id, c.prev, c.doc).catch((e) => console.error("notify:", e.message));
   }
