@@ -55,6 +55,7 @@ const stateOf = (d) => ({
   status: d.status || "scheduled",
   minute: d.minute ?? 0,
   kickoff: d.kickoff && d.kickoff.toMillis ? d.kickoff.toMillis() : 0,
+  src: d.provider || "",
 });
 
 const same = (a, b) => !!a && Object.keys(b).every((k) => a[k] === b[k]);
@@ -209,6 +210,14 @@ async function syncMatches() {
       updatedAt: Timestamp.now(),
     };
 
+    // football-data's free tier flips today's matches to IN_PLAY/FINISHED but
+    // hides the score (null) until much later. A "live 0-0" with no real score
+    // is wrong, so treat it as not started until a score (or live feed) exists.
+    if (doc.status !== "scheduled" && doc.status !== "postponed" && ft.home == null) {
+      doc.status = "scheduled";
+      doc.minute = 0;
+    }
+
     // Live score from TheSportsDB wins while football-data hasn't finished the match.
     const lv = live.get(id);
     if (lv && doc.status !== "finished") {
@@ -236,7 +245,12 @@ async function syncMatches() {
 
     // Never step back: once a match is live/finished in Firestore, a stale
     // "scheduled" from football-data (live feed dropped it) must not undo it.
-    if (prev && PLAYED.has(prev.status) && !PLAYED.has(doc.status) && doc.status !== "postponed") continue;
+    // Only protects states that came from real data (TheSportsDB live feed);
+    // a fake "live 0-0" written earlier from football-data alone is corrected.
+    if (
+      prev && PLAYED.has(prev.status) && !PLAYED.has(doc.status) && doc.status !== "postponed" &&
+      prev.src.includes("thesportsdb")
+    ) continue;
 
     batch.set(ref, doc, { merge: true });
     if (isNew) {
