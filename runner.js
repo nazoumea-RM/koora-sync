@@ -334,6 +334,27 @@ function mapTimeline(rows) {
   return out.sort((x, y) => x.minute - y.minute);
 }
 
+// Same shape the app reads: stats: [{ label, home, away, percent }]
+const STAT_ORDER = ["Ball Possession", "Total Shots", "Shots on Goal", "Shots off Goal", "Blocked Shots",
+  "Corner Kicks", "Offsides", "Fouls", "Yellow Cards", "Red Cards", "Goalkeeper Saves", "Total passes", "Passes accurate"];
+
+function mapStats(rows) {
+  const num = (v) => parseFloat(String(v ?? "0").replace("%", "")) || 0;
+  const out = (rows || [])
+    .filter((r) => r.strStat)
+    .map((r) => ({
+      label: r.strStat,
+      home: num(r.intHome),
+      away: num(r.intAway),
+      percent: /possession|%/i.test(r.strStat) || String(r.intHome).includes("%"),
+    }));
+  const rank = (l) => {
+    const i = STAT_ORDER.findIndex((s) => s.toLowerCase() === l.toLowerCase());
+    return i < 0 ? 99 : i;
+  };
+  return out.sort((a, b) => rank(a.label) - rank(b.label));
+}
+
 async function syncEvents() {
   if (!TSDB_KEY) return;
   const now = Date.now();
@@ -351,13 +372,24 @@ async function syncEvents() {
       if (!tsdbId) continue;
       const tl = await tsdbV1(`lookuptimeline.php?id=${tsdbId}`);
       const events = mapTimeline(tl.timeline);
-      if (events.length && events.length !== eventsCount.get(id)) {
-        await db.collection("matches").doc(id).set({ events, tsdbEventId: tsdbId }, { merge: true });
-        eventsCount.set(id, events.length);
-        written++;
-        console.log(`  events ${id}: ${events.length}`);
+      let stats = [];
+      try {
+        const s = await tsdbV1(`lookupeventstats.php?id=${tsdbId}`);
+        stats = mapStats(s.eventstats);
+      } catch (e) {
+        console.error(`  stats ${id}:`, e.message);
       }
-      if (st.status === "finished" && events.length) eventsDone.add(id);
+      const sig = `${events.length}|${stats.length}|${stats.map((x) => x.home + ":" + x.away).join(",")}`;
+      if ((events.length || stats.length) && sig !== eventsCount.get(id)) {
+        const upd = { tsdbEventId: tsdbId };
+        if (events.length) upd.events = events;
+        if (stats.length) upd.stats = stats;
+        await db.collection("matches").doc(id).set(upd, { merge: true });
+        eventsCount.set(id, sig);
+        written++;
+        console.log(`  events ${id}: ${events.length} events, ${stats.length} stats`);
+      }
+      if (st.status === "finished" && events.length && stats.length) eventsDone.add(id);
     } catch (e) {
       console.error(`  events ${id}:`, e.message);
     }
