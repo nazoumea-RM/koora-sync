@@ -343,12 +343,15 @@ function mapTimeline(rows) {
     else if (kind.includes("subst")) type = "substitution";
     if (!type) continue;
     const assist = (r.strAssist || "").trim();
+    const isSub = type === "substitution";
+    // TheSportsDB substitutions: strPlayer = player going OFF, strAssist = player coming ON.
+    // The app wants player = coming on, detail = going off.
     out.push({
       type,
       minute: parseInt(r.intTime, 10) || 0,
-      player: r.strPlayer || "",
+      player: isSub ? (assist || r.strPlayer || "") : (r.strPlayer || ""),
       team: String(r.strHome || "").toLowerCase() === "yes" ? "home" : "away",
-      detail: type === "substitution" ? assist : (type === "goal" && assist ? `Assist: ${assist}` : ""),
+      detail: isSub ? (assist ? r.strPlayer || "" : "") : (type === "goal" && assist ? `Assist: ${assist}` : ""),
     });
   }
   return out.sort((x, y) => x.minute - y.minute);
@@ -443,7 +446,7 @@ async function syncEvents() {
         console.error(`  lineup ${id}:`, e.message);
       }
       const nLine = lineups ? lineups.home.starting.length + lineups.away.starting.length : 0;
-      const sig = `${events.length}|${stats.length}|${nLine}|${stats.map((x) => x.home + ":" + x.away).join(",")}`;
+      const sig = `v2|${events.length}|${stats.length}|${nLine}|${stats.map((x) => x.home + ":" + x.away).join(",")}`;
       if ((events.length || stats.length || nLine) && sig !== eventsCount.get(id)) {
         const upd = { tsdbEventId: tsdbId };
         if (events.length) upd.events = events;
