@@ -6,6 +6,8 @@
 const { getFirestore, Timestamp } = require("firebase-admin/firestore");
 const { API_FOOTBALL_LEAGUES, CHANNELS, isoDay } = require("./config");
 
+const { withAr, leagueAr } = require("./arabic");
+
 const BASE = "https://v3.football.api-sports.io";
 
 async function af(path, key) {
@@ -27,7 +29,7 @@ function status(short) {
   return "postponed"; // PST, CANC, ABD, SUSP
 }
 
-const team = (t = {}) => ({ id: `af_${t.id}`, name: t.name || "TBD", logoUrl: t.logo || "" });
+const team = (t = {}) => withAr({ id: `af_${t.id}`, name: t.name || "TBD", logoUrl: t.logo || "" });
 
 /** Today's fixtures: 1 request per league. */
 async function syncFixtures(key) {
@@ -43,6 +45,7 @@ async function syncFixtures(key) {
       writer.set(db.collection("matches").doc(`af_${f.fixture.id}`), {
         leagueId: l.leagueId,
         leagueName: l.name,
+        leagueNameAr: leagueAr(l.leagueId, l.name),
         homeTeam: home,
         awayTeam: away,
         homeScore: f.goals.home ?? 0,
@@ -55,7 +58,7 @@ async function syncFixtures(key) {
         provider: "api-football",
       }, { merge: true });
       for (const t of [home, away]) {
-        writer.set(db.collection("teams").doc(t.id), { name: t.name, logoUrl: t.logoUrl }, { merge: true });
+        writer.set(db.collection("teams").doc(t.id), { name: t.name, nameAr: t.nameAr, logoUrl: t.logoUrl }, { merge: true });
       }
       count++;
     }

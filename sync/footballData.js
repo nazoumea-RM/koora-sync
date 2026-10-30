@@ -5,6 +5,8 @@
 const { getFirestore, Timestamp } = require("firebase-admin/firestore");
 const { FOOTBALL_DATA_COMPETITIONS, LEAGUE_NAMES, CHANNELS, isoDay } = require("./config");
 
+const { withAr, leagueAr } = require("./arabic");
+
 const BASE = "https://api.football-data.org/v4";
 
 async function fd(path, key) {
@@ -28,7 +30,7 @@ const STATUS = {
 };
 
 // Prefix ids so provider ids never clash with each other or with demo data.
-const team = (t = {}) => ({
+const team = (t = {}) => withAr({
   id: `fd_${t.id}`,
   name: t.shortName || t.name || "TBD",
   logoUrl: t.crest || "",
@@ -53,6 +55,7 @@ async function syncMatches(key) {
     writer.set(db.collection("matches").doc(`fd_${m.id}`), {
       leagueId,
       leagueName: LEAGUE_NAMES[leagueId] || m.competition.name,
+      leagueNameAr: leagueAr(leagueId, m.competition.name),
       homeTeam: home,
       awayTeam: away,
       homeScore: ft.home ?? 0,
@@ -66,7 +69,7 @@ async function syncMatches(key) {
     }, { merge: true }); // merge: keeps events/stats you add from elsewhere
 
     for (const t of [home, away]) {
-      writer.set(db.collection("teams").doc(t.id), { name: t.name, logoUrl: t.logoUrl }, { merge: true });
+      writer.set(db.collection("teams").doc(t.id), { name: t.name, nameAr: t.nameAr, logoUrl: t.logoUrl }, { merge: true });
     }
     count++;
   }

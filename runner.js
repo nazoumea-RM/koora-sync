@@ -13,6 +13,7 @@ initializeApp({ credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT
 const { FOOTBALL_DATA_COMPETITIONS, LEAGUE_NAMES, CHANNELS, isoDay } = require("./sync/config");
 const footballData = require("./sync/footballData");
 const { syncNews } = require("./sync/news");
+const { withAr, leagueAr, playerAr, positionAr, statAr } = require("./sync/arabic");
 const { Timestamp } = require("firebase-admin/firestore");
 
 const FD_KEY = process.env.FOOTBALL_DATA_KEY;
@@ -37,7 +38,7 @@ const STATUS = {
   CANCELLED: "postponed",
 };
 
-const team = (t = {}) => ({
+const team = (t = {}) => withAr({
   id: `fd_${t.id}`,
   name: t.shortName || t.name || "TBD",
   logoUrl: t.crest || "",
@@ -56,6 +57,7 @@ const stateOf = (d) => ({
   minute: d.minute ?? 0,
   kickoff: d.kickoff && d.kickoff.toMillis ? d.kickoff.toMillis() : 0,
   src: d.provider || "",
+  ar: d.homeTeam && d.homeTeam.nameAr ? 1 : 0, // docs written before Arabic names get rewritten once
 });
 
 const same = (a, b) => !!a && Object.keys(b).every((k) => a[k] === b[k]);
@@ -198,6 +200,7 @@ async function syncMatches() {
     const doc = {
       leagueId,
       leagueName: LEAGUE_NAMES[leagueId] || m.competition.name,
+      leagueNameAr: leagueAr(leagueId, m.competition.name),
       homeTeam: home,
       awayTeam: away,
       homeScore: ft.home ?? 0,
@@ -253,7 +256,7 @@ async function syncMatches() {
     batch.set(ref, doc, { merge: true });
     if (isNew) {
       for (const t of [home, away]) {
-        batch.set(db.collection("teams").doc(t.id), { name: t.name, logoUrl: t.logoUrl }, { merge: true });
+        batch.set(db.collection("teams").doc(t.id), { name: t.name, nameAr: t.nameAr, logoUrl: t.logoUrl }, { merge: true });
       }
     }
     cache.set(id, next);
@@ -346,12 +349,17 @@ function mapTimeline(rows) {
     const isSub = type === "substitution";
     // TheSportsDB substitutions: strPlayer = player going OFF, strAssist = player coming ON.
     // The app wants player = coming on, detail = going off.
+    const player = isSub ? (assist || r.strPlayer || "") : (r.strPlayer || "");
+    const subOut = isSub && assist ? r.strPlayer || "" : "";
+    const scorerAssist = !isSub && type === "goal" && assist ? assist : "";
     out.push({
       type,
       minute: parseInt(r.intTime, 10) || 0,
-      player: isSub ? (assist || r.strPlayer || "") : (r.strPlayer || ""),
+      player,
+      playerAr: playerAr(player),
       team: String(r.strHome || "").toLowerCase() === "yes" ? "home" : "away",
-      detail: isSub ? (assist ? r.strPlayer || "" : "") : (type === "goal" && assist ? `Assist: ${assist}` : ""),
+      detail: isSub ? subOut : (scorerAssist ? `Assist: ${scorerAssist}` : ""),
+      detailAr: isSub ? playerAr(subOut) : (scorerAssist ? `تمريرة حاسمة: ${playerAr(scorerAssist)}` : ""),
     });
   }
   return out.sort((x, y) => x.minute - y.minute);
@@ -367,6 +375,7 @@ function mapStats(rows) {
     .filter((r) => r.strStat)
     .map((r) => ({
       label: r.strStat,
+      labelAr: statAr(r.strStat),
       home: num(r.intHome),
       away: num(r.intAway),
       percent: /possession|%/i.test(r.strStat) || String(r.intHome).includes("%"),
@@ -387,8 +396,10 @@ function mapLineup(rows) {
     const s = String(r.strHome || "").toLowerCase() === "yes" ? out.home : out.away;
     const p = {
       name: r.strPlayer,
+      nameAr: playerAr(r.strPlayer),
       number: parseInt(r.intSquadNumber, 10) || 0,
       position: r.strPosition || "",
+      positionAr: positionAr(r.strPosition || ""),
     };
     if (String(r.strSubstitute || "").toLowerCase() === "yes") s.subs.push(p);
     else s.starting.push(p);
@@ -446,7 +457,7 @@ async function syncEvents() {
         console.error(`  lineup ${id}:`, e.message);
       }
       const nLine = lineups ? lineups.home.starting.length + lineups.away.starting.length : 0;
-      const sig = `v2|${events.length}|${stats.length}|${nLine}|${stats.map((x) => x.home + ":" + x.away).join(",")}`;
+      const sig = `v3|${events.length}|${stats.length}|${nLine}|${stats.map((x) => x.home + ":" + x.away).join(",")}`;
       if ((events.length || stats.length || nLine) && sig !== eventsCount.get(id)) {
         const upd = { tsdbEventId: tsdbId };
         if (events.length) upd.events = events;
@@ -579,8 +590,9 @@ function tsdbDoc(ev, league) {
   return {
     leagueId: league.leagueId,
     leagueName: league.leagueName,
-    homeTeam: { id: `tsdb_${ev.idHomeTeam}`, name: ev.strHomeTeam || "TBD", logoUrl: ev.strHomeTeamBadge || "" },
-    awayTeam: { id: `tsdb_${ev.idAwayTeam}`, name: ev.strAwayTeam || "TBD", logoUrl: ev.strAwayTeamBadge || "" },
+    leagueNameAr: leagueAr(league.leagueId, league.leagueName),
+    homeTeam: withAr({ id: `tsdb_${ev.idHomeTeam}`, name: ev.strHomeTeam || "TBD", logoUrl: ev.strHomeTeamBadge || "" }),
+    awayTeam: withAr({ id: `tsdb_${ev.idAwayTeam}`, name: ev.strAwayTeam || "TBD", logoUrl: ev.strAwayTeamBadge || "" }),
     homeScore: Number(ev.intHomeScore) || 0,
     awayScore: Number(ev.intAwayScore) || 0,
     status,
