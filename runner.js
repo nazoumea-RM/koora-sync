@@ -684,19 +684,22 @@ async function notify(matchId, before, after) {
   const away = after.awayTeam || {};
   if (!home.id || !away.id) return;
 
+  // Notifications are sent in Arabic.
+  const hName = home.nameAr || home.name;
+  const aName = away.nameAr || away.name;
   const hs = after.homeScore ?? 0;
   const as = after.awayScore ?? 0;
-  const score = `${home.name} ${hs} - ${as} ${away.name}`;
-  const minute = after.minute ? ` (${after.minute}')` : "";
+  const score = `${hName} ${hs} - ${as} ${aName}`;
+  const minute = after.minute ? ` (الدقيقة ${after.minute})` : "";
   const notes = [];
 
   if (before.status === "scheduled" && after.status === "live") {
-    notes.push({ title: "Kick-off!", body: `${home.name} vs ${away.name} has started` });
+    notes.push({ title: "انطلاق المباراة!", body: `انطلقت مباراة ${hName} و${aName}` });
   }
-  if (hs > (before.homeScore ?? 0)) notes.push({ title: `⚽ GOAL! ${home.name}${minute}`, body: score });
-  if (as > (before.awayScore ?? 0)) notes.push({ title: `⚽ GOAL! ${away.name}${minute}`, body: score });
+  if (hs > (before.homeScore ?? 0)) notes.push({ title: `⚽ هدف! ${hName}${minute}`, body: score });
+  if (as > (before.awayScore ?? 0)) notes.push({ title: `⚽ هدف! ${aName}${minute}`, body: score });
   if (before.status !== "finished" && after.status === "finished") {
-    notes.push({ title: "Full time", body: score });
+    notes.push({ title: "نهاية المباراة", body: score });
   }
   if (notes.length === 0) return;
 
